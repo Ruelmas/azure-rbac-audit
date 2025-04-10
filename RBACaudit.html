@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RBAC Role Usage Audit Viewer</title>
+  <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { font-family: Arial, sans-serif; padding: 2rem; background: #f8f9fa; }
+    h1 { margin-bottom: 0.25rem; }
+    p.description { margin-top: 0; max-width: 800px; line-height: 1.6; }
+    button { padding: 10px 20px; font-size: 16px; background: #0078d4; color: white; border: none; cursor: pointer; border-radius: 5px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
+    th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+    th { background-color: #f0f0f0; }
+    .remove { color: #d32f2f; font-weight: bold; }
+    .reduce { color: #f9a825; font-weight: bold; }
+    .keep { color: #388e3c; font-weight: bold; }
+    .suspicious-ip { background-color: #fdd835; font-weight: bold; } /* Style for highlighting */
+    .card-header button { color: #0078d4; text-decoration: none; }
+    .card-header button.collapsed { color: #000; }
+  </style>
+</head>
+<body>
+
+  <h1>RBAC Role Usage Audit Report</h1>
+  <p class="description">
+    This report analyzes Azure role assignments and compares them with actual user activity logs. It identifies:
+    <ul>
+      <li><strong>Unused roles</strong> — roles assigned to users who haven't performed any actions</li>
+      <li><strong>Stale roles</strong> — users who haven’t used their permissions recently (e.g., > 30/90 days)</li>
+      <li><strong>Over-permissioned roles</strong> — users with elevated roles performing only basic actions</li>
+      <li><strong>Misuse</strong> — users assigned to restricted roles (like Reader) but performing higher-privilege operations</li>
+    </ul>
+    Click the button below to retrieve and display the audit results from your configured data source.
+  </p>
+
+  <button onclick="loadAudit()">🔍 Load Audit Data</button>
+
+  <div id="accordion" class="mt-4">
+    </div>
+
+  <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.3/dist/umd/popper.min.js"></script>
+  <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+
+  <script>
+    // --- CONFIGURATION ---
+    // TODO: Replace this URL with the actual location of your generated 'role_usage_audit.json' file.
+    // This could be a relative path (e.g., "role_usage_audit.json") if the file is in the same directory,
+    // or a full URL if hosted elsewhere (e.g., on Azure Blob Storage).
+    const auditDataURL = "REPLACE_WITH_YOUR_JSON_FILE_URL_OR_PATH"; // e.g., "./role_usage_audit.json"
+
+    // TODO: Update this list with IP addresses or patterns considered suspicious in YOUR environment.
+    // The current function performs a simple exact match check.
+    const suspiciousIPsList = [
+      // "1.2.3.4", // Example IP
+      // "203.0.113.1" // Example IP
+    ];
+    // --- END CONFIGURATION ---
+
+    function loadAudit() {
+      if (auditDataURL === "REPLACE_WITH_YOUR_JSON_FILE_URL_OR_PATH") {
+          alert("Configuration needed: Please update the 'auditDataURL' variable in the HTML file script block.");
+          return;
+      }
+
+      fetch(auditDataURL)
+        .then(response => {
+          if (!response.ok) {
+             throw new Error(`Failed to fetch audit data. Status: ${response.status} ${response.statusText}. Check the URL and file access permissions.`);
+          }
+          return response.json();
+        })
+        .then(data => {
+          const accordion = document.getElementById('accordion');
+          accordion.innerHTML = ''; // Clear previous results
+
+          const groupedData = groupBySuggestion(data);
+          const suggestionOrder = ['Remove', 'Reduce', 'Misuse', 'Keep', 'No Suggestion']; // Define preferred order
+
+          // Sort keys based on suggestionOrder, putting others at the end
+          const sortedKeys = Object.keys(groupedData).sort((a, b) => {
+             const indexA = suggestionOrder.indexOf(a);
+             const indexB = suggestionOrder.indexOf(b);
+             if (indexA === -1 && indexB === -1) return a.localeCompare(b); // Both not in order, sort alphabetically
+             if (indexA === -1) return 1;  // a is not in order, put it later
+             if (indexB === -1) return -1; // b is not in order, put it later
+             return indexA - indexB; // Both are in order, sort by defined order
+          });
+
+
+          // Render each collapsible section
+          sortedKeys.forEach((suggestion, index) => {
+            const groupId = `group-${index}`;
+            const collapseId = `collapse-${index}`;
+            const headingId = `heading-${index}`;
+            // Determine if the first section should be shown by default
+            const isFirstSection = index === 0;
+
+            const groupHeader = document.createElement('div');
+            groupHeader.classList.add('card');
+            groupHeader.innerHTML = `
+              <div class="card-header" id="${headingId}">
+                <h5 class="mb-0">
+                  <button class="btn btn-link ${isFirstSection ? '' : 'collapsed'}" type="button" data-toggle="collapse" data-target="#${collapseId}" aria-expanded="${isFirstSection ? 'true' : 'false'}" aria-controls="${collapseId}">
+                    ${suggestion} (${groupedData[suggestion].length})
+                  </button>
+                </h5>
+              </div>
+              <div id="${collapseId}" class="collapse ${isFirstSection ? 'show' : ''}" aria-labelledby="${headingId}" data-parent="#accordion">
+                <div class="card-body" id="${groupId}"></div>
+              </div>
+            `;
+            accordion.appendChild(groupHeader);
+
+            // Append user entries to the corresponding suggestion group body
+            const groupBody = document.getElementById(groupId);
+            groupedData[suggestion].forEach(entry => {
+              const userRow = document.createElement('div');
+              // Check if the IP is in the configured suspicious list
+              const ipClass = isSuspiciousIP(entry.IP) ? "suspicious-ip" : "";
+              // Determine suggestion class for styling
+              let suggestionClass = 'keep'; // Default
+              if (suggestion.toUpperCase().includes('REMOVE')) suggestionClass = 'remove';
+              else if (suggestion.toUpperCase().includes('REDUCE') || suggestion.toUpperCase().includes('MISUSE')) suggestionClass = 'reduce'; // Grouping Reduce/Misuse visually
+
+              userRow.innerHTML = `
+                <p>
+                  <strong>${entry.User || 'N/A'}</strong> (${entry.Role || 'N/A'}) — Actions: ${entry.Actions || 'N/A'}<br>
+                  <span class="${ipClass}">IP: ${entry.IP || 'N/A'}</span><br>
+                  First Activity: ${entry["First Activity"] || 'Never'}, Last Activity: ${entry["Last Activity"] || 'Never'}<br>
+                  Scope: ${entry.Scope || 'N/A'}, Assignment Date: ${entry["Assignment Date"] || 'N/A'}, Action Count: ${entry["Action Count"] || 0}, Inactive Days: ${entry["Inactive Days"] ?? "N/A"}<br>
+                  <strong>Suggestion:</strong> <span class="${suggestionClass}">${suggestion}</span>
+                </p>
+                <hr>
+              `;
+              groupBody.appendChild(userRow);
+            });
+          });
+        })
+        .catch(err => {
+          console.error("Error loading or processing audit data:", err);
+          alert("Error loading data: " + err.message + "\nCheck the browser console for more details.");
+          // Optionally display error in the UI
+          const accordion = document.getElementById('accordion');
+          accordion.innerHTML = `<div class="alert alert-danger" role="alert">Failed to load audit data. Please check the configuration and ensure the JSON file is accessible. Error: ${err.message}</div>`;
+        });
+    }
+
+    function groupBySuggestion(data) {
+      return data.reduce((acc, entry) => {
+        // Use 'No Suggestion' if the Suggestion field is missing or empty
+        const suggestion = entry.Suggestion || 'No Suggestion';
+        if (!acc[suggestion]) {
+          acc[suggestion] = [];
+        }
+        acc[suggestion].push(entry);
+        return acc;
+      }, {});
+    }
+
+    function isSuspiciousIP(ip) {
+      if (!ip) return false; // Don't flag null/empty IPs
+      // Simple check using the configured list
+      return suspiciousIPsList.includes(ip);
+      // For more advanced checks (e.g., CIDR ranges), enhance this function.
+    }
+
+    // Optional: Automatically load data when the page loads
+    // document.addEventListener('DOMContentLoaded', loadAudit);
+
+  </script>
+
+</body>
+</html>
